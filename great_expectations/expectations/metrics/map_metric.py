@@ -285,14 +285,16 @@ def column_condition_partial(
                 ) = execution_engine.get_compute_domain(
                     domain_kwargs=metric_domain_kwargs, domain_type=domain_type
                 )
+                # TODO: <Alex>ALEX</Alex>
                 # TODO: <Alex>Is this the correct place for and type of Exception to raise if domain data is not attributable?</Alex>
+                column_name = accessor_domain_kwargs["column"]
                 try:
                     if filter_column_isnull:
-                        df = df[df[accessor_domain_kwargs["column"]].notnull()]
+                        df = df[df[column_name].notnull()]
 
                     meets_expectation_series = metric_fn(
                         cls,
-                        df[accessor_domain_kwargs["column"]],
+                        df[column_name],
                         **metric_value_kwargs,
                         _metrics=metrics,
                     )
@@ -303,7 +305,7 @@ def column_condition_partial(
                     )
                 except KeyError:
                     raise ge_exceptions.ExecutionEngineError(
-                        message=f'Error: The column "{accessor_domain_kwargs["column"]}" in BatchData does not exist.'
+                        message=f'Error: The column "{column_name}" in BatchData does not exist.'
                     )
 
             return inner_func
@@ -419,6 +421,10 @@ def column_condition_partial(
                     domain_kwargs=metric_domain_kwargs, domain_type=domain_type
                 )
                 column_name = accessor_domain_kwargs["column"]
+                if column_name not in data.columns:
+                    raise ge_exceptions.ExecutionEngineError(
+                        message=f'Error: The column "{column_name}" in BatchData does not exist.'
+                    )
                 column = data[column_name]
                 expected_condition = metric_fn(
                     cls,

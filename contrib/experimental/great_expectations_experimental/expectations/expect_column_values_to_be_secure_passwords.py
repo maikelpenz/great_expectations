@@ -2,7 +2,6 @@ import json
 import re  # regular expressions
 from typing import Optional
 
-# !!! This giant block of imports should be something simpler, such as:
 from great_expectations import *
 from great_expectations.core.expectation_configuration import ExpectationConfiguration
 from great_expectations.execution_engine import (
@@ -97,6 +96,7 @@ class ColumnValuesContainSecurePasswords(ColumnMapMetricProvider):
                         max_numbers = consec_numbers
                     consec_numbers = 0
                     consec_letters = 0
+
             return not (
                 uppercase_letters < min_uppercase
                 or lowercase_letters < min_lowercase
@@ -111,7 +111,7 @@ class ColumnValuesContainSecurePasswords(ColumnMapMetricProvider):
 
 class ExpectColumnValuesToBeSecurePasswords(ColumnMapExpectation):
     """Expect column entries to be secure passwords, as defined by expectation parameters.
-    
+
     expect_column_values_to_be_secure_passwords is a \
     :func:`column_map_expectation <great_expectations.execution_engine.execution_engine.MetaExecutionEngine
     .column_map_expectation>`.

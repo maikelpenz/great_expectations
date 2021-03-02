@@ -2,13 +2,14 @@ import logging
 import traceback
 import uuid
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 import numpy as np
 
 import great_expectations.exceptions as ge_exceptions
 from great_expectations.core import ExpectationConfiguration
 from great_expectations.core.util import convert_to_json_serializable
+from great_expectations.exceptions.metric_exceptions import MetricProviderError
 from great_expectations.execution_engine import ExecutionEngine, PandasExecutionEngine
 from great_expectations.execution_engine.execution_engine import (
     MetricDomainTypes,
@@ -90,15 +91,23 @@ def column_function_partial(
                 ) = execution_engine.get_compute_domain(
                     domain_kwargs=metric_domain_kwargs, domain_type=domain_type
                 )
-                if filter_column_isnull:
-                    df = df[df[accessor_domain_kwargs["column"]].notnull()]
-                values = metric_fn(
-                    cls,
-                    df[accessor_domain_kwargs["column"]],
-                    **metric_value_kwargs,
-                    _metrics=metrics,
-                )
-                return values, compute_domain_kwargs, accessor_domain_kwargs
+
+                column_name = accessor_domain_kwargs["column"]
+                try:
+                    if filter_column_isnull:
+                        df = df[df[column_name].notnull()]
+
+                    values = metric_fn(
+                        cls,
+                        df[column_name],
+                        **metric_value_kwargs,
+                        _metrics=metrics,
+                    )
+                    return values, compute_domain_kwargs, accessor_domain_kwargs
+                except KeyError:
+                    raise ge_exceptions.ExecutionEngineError(
+                        message=f'Error: The column "{column_name}" in BatchData does not exist.'
+                    )
 
             return inner_func
 
@@ -209,10 +218,17 @@ def column_function_partial(
                 ) = execution_engine.get_compute_domain(
                     domain_kwargs=compute_domain_kwargs, domain_type=domain_type
                 )
+
                 column_name = accessor_domain_kwargs["column"]
+                if column_name not in data.columns:
+                    raise ge_exceptions.ExecutionEngineError(
+                        message=f'Error: The column "{column_name}" in BatchData does not exist.'
+                    )
+
+                column = data[column_name]
                 column_function = metric_fn(
                     cls,
-                    column=data[column_name],
+                    column=column,
                     **metric_value_kwargs,
                     _metrics=metrics,
                     _compute_domain_kwargs=compute_domain_kwargs,
@@ -286,6 +302,7 @@ def column_condition_partial(
                 ) = execution_engine.get_compute_domain(
                     domain_kwargs=metric_domain_kwargs, domain_type=domain_type
                 )
+
                 column_name = accessor_domain_kwargs["column"]
                 try:
                     if filter_column_isnull:
@@ -493,6 +510,7 @@ def _pandas_column_map_condition_values(
     df, _, _ = execution_engine.get_compute_domain(
         domain_kwargs=compute_domain_kwargs, domain_type="identity"
     )
+
     ###
     # NOTE: 20201111 - JPC - in the map_series / map_condition_series world (pandas), we
     # currently handle filter_column_isnull differently than other map_fn / map_condition
@@ -501,14 +519,21 @@ def _pandas_column_map_condition_values(
     filter_column_isnull = kwargs.get(
         "filter_column_isnull", getattr(cls, "filter_column_isnull", False)
     )
-    if filter_column_isnull:
-        df = df[df[accessor_domain_kwargs["column"]].notnull()]
 
-    if "column" in accessor_domain_kwargs:
-        domain_values = df[accessor_domain_kwargs["column"]]
-    else:
-        raise ValueError(
-            "_pandas_column_map_condition_values requires a column in accessor_domain_kwargs"
+    column_name = accessor_domain_kwargs["column"]
+    try:
+        if filter_column_isnull:
+            df = df[df[column_name].notnull()]
+
+        if "column" in accessor_domain_kwargs:
+            domain_values = df[column_name]
+        else:
+            raise ValueError(
+                "_pandas_column_map_condition_values requires a column in accessor_domain_kwargs"
+            )
+    except KeyError:
+        raise ge_exceptions.ExecutionEngineError(
+            message=f'Error: The column "{column_name}" in BatchData does not exist.'
         )
 
     result_format = metric_value_kwargs["result_format"]
@@ -550,6 +575,7 @@ def _pandas_column_map_series_and_domain_values(
     df, _, _ = execution_engine.get_compute_domain(
         domain_kwargs=compute_domain_kwargs, domain_type="identity"
     )
+
     ###
     # NOTE: 20201111 - JPC - in the map_series / map_condition_series world (pandas), we
     # currently handle filter_column_isnull differently than other map_fn / map_condition
@@ -558,14 +584,21 @@ def _pandas_column_map_series_and_domain_values(
     filter_column_isnull = kwargs.get(
         "filter_column_isnull", getattr(cls, "filter_column_isnull", False)
     )
-    if filter_column_isnull:
-        df = df[df[accessor_domain_kwargs["column"]].notnull()]
 
-    if "column" in accessor_domain_kwargs:
-        domain_values = df[accessor_domain_kwargs["column"]]
-    else:
-        raise ValueError(
-            "_pandas_column_map_series_and_domain_values requires a column in accessor_domain_kwargs"
+    column_name = accessor_domain_kwargs["column"]
+    try:
+        if filter_column_isnull:
+            df = df[df[column_name].notnull()]
+
+        if "column" in accessor_domain_kwargs:
+            domain_values = df[column_name]
+        else:
+            raise ValueError(
+                "_pandas_column_map_series_and_domain_values requires a column in accessor_domain_kwargs"
+            )
+    except KeyError:
+        raise ge_exceptions.ExecutionEngineError(
+            message=f'Error: The column "{column_name}" in BatchData does not exist.'
         )
 
     result_format = metric_value_kwargs["result_format"]
@@ -606,6 +639,7 @@ def _pandas_map_condition_index(
     df, _, _ = execution_engine.get_compute_domain(
         domain_kwargs=compute_domain_kwargs, domain_type="identity"
     )
+
     ###
     # NOTE: 20201111 - JPC - in the map_series / map_condition_series world (pandas), we
     # currently handle filter_column_isnull differently than other map_fn / map_condition
@@ -614,16 +648,22 @@ def _pandas_map_condition_index(
     filter_column_isnull = kwargs.get(
         "filter_column_isnull", getattr(cls, "filter_column_isnull", False)
     )
-    if filter_column_isnull:
-        df = df[df[accessor_domain_kwargs["column"]].notnull()]
-    data = df[accessor_domain_kwargs["column"]]
+
+    column_name = accessor_domain_kwargs["column"]
+    try:
+        if filter_column_isnull:
+            df = df[df[column_name].notnull()]
+    except KeyError:
+        raise ge_exceptions.ExecutionEngineError(
+            message=f'Error: The column "{column_name}" in BatchData does not exist.'
+        )
 
     result_format = metric_value_kwargs["result_format"]
     if result_format["result_format"] == "COMPLETE":
-        return list(df[boolean_mapped_unexpected_values == True].index)
+        return list(df[boolean_mapped_unexpected_values].index)
     else:
         return list(
-            df[boolean_mapped_unexpected_values == True].index[
+            df[boolean_mapped_unexpected_values].index[
                 : result_format["partial_unexpected_count"]
             ]
         )
@@ -647,6 +687,7 @@ def _pandas_column_map_condition_value_counts(
     df, _, _ = execution_engine.get_compute_domain(
         domain_kwargs=compute_domain_kwargs, domain_type="identity"
     )
+
     ###
     # NOTE: 20201111 - JPC - in the map_series / map_condition_series world (pandas), we
     # currently handle filter_column_isnull differently than other map_fn / map_condition
@@ -655,26 +696,30 @@ def _pandas_column_map_condition_value_counts(
     filter_column_isnull = kwargs.get(
         "filter_column_isnull", getattr(cls, "filter_column_isnull", False)
     )
-    if filter_column_isnull:
-        df = df[df[accessor_domain_kwargs["column"]].notnull()]
-    data = df[accessor_domain_kwargs["column"]]
-    if "column" in accessor_domain_kwargs:
-        domain_values = df[accessor_domain_kwargs["column"]]
-    else:
-        raise ValueError(
-            "_pandas_column_map_condition_value_counts requires a column in accessor_domain_kwargs"
+
+    column_name = accessor_domain_kwargs["column"]
+    try:
+        if filter_column_isnull:
+            df = df[df[column_name].notnull()]
+        if "column" in accessor_domain_kwargs:
+            domain_values = df[column_name]
+        else:
+            raise ValueError(
+                "_pandas_column_map_condition_value_counts requires a column in accessor_domain_kwargs"
+            )
+    except KeyError:
+        raise ge_exceptions.ExecutionEngineError(
+            message=f'Error: The column "{column_name}" in BatchData does not exist.'
         )
 
     result_format = metric_value_kwargs["result_format"]
     value_counts = None
     try:
-        value_counts = domain_values[
-            boolean_mapped_unexpected_values == True
-        ].value_counts()
+        value_counts = domain_values[boolean_mapped_unexpected_values].value_counts()
     except ValueError:
         try:
             value_counts = (
-                domain_values[boolean_mapped_unexpected_values == True]
+                domain_values[boolean_mapped_unexpected_values]
                 .apply(tuple)
                 .value_counts()
             )
@@ -708,6 +753,7 @@ def _pandas_map_condition_rows(
     df, _, _ = execution_engine.get_compute_domain(
         domain_kwargs=compute_domain_kwargs, domain_type="identity"
     )
+
     ###
     # NOTE: 20201111 - JPC - in the map_series / map_condition_series world (pandas), we
     # currently handle filter_column_isnull differently than other map_fn / map_condition
@@ -716,15 +762,21 @@ def _pandas_map_condition_rows(
     filter_column_isnull = kwargs.get(
         "filter_column_isnull", getattr(cls, "filter_column_isnull", False)
     )
-    if filter_column_isnull:
-        df = df[df[accessor_domain_kwargs["column"]].notnull()]
-    data = df[accessor_domain_kwargs["column"]]
+
+    column_name = accessor_domain_kwargs["column"]
+    try:
+        if filter_column_isnull:
+            df = df[df[column_name].notnull()]
+    except KeyError:
+        raise ge_exceptions.ExecutionEngineError(
+            message=f'Error: The column "{column_name}" in BatchData does not exist.'
+        )
 
     result_format = metric_value_kwargs["result_format"]
     if result_format["result_format"] == "COMPLETE":
-        return df[boolean_mapped_unexpected_values == True]
+        return df[boolean_mapped_unexpected_values]
     else:
-        return df[boolean_mapped_unexpected_values == True][
+        return df[boolean_mapped_unexpected_values][
             result_format["partial_unexpected_count"]
         ]
 
@@ -1385,7 +1437,7 @@ class MapMetricProvider(MetricProvider):
             try:
                 _ = get_metric_provider(metric_name + ".aggregate_fn", execution_engine)
                 has_aggregate_fn = True
-            except ge_exceptions.MetricProviderError:
+            except MetricProviderError:
                 has_aggregate_fn = False
             if has_aggregate_fn:
                 dependencies["metric_partial_fn"] = MetricConfiguration(
@@ -1429,7 +1481,7 @@ class MapMetricProvider(MetricProvider):
                 metric.metric_domain_kwargs,
                 metric.metric_value_kwargs,
             )
-        except ge_exceptions.MetricProviderError:
+        except MetricProviderError:
             pass
 
         return dependencies

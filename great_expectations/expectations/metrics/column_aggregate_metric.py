@@ -65,7 +65,6 @@ def column_aggregate_value(
                 )
 
                 column_name = accessor_domain_kwargs["column"]
-
                 try:
                     if filter_column_isnull:
                         df = df[df[column_name].notnull()]

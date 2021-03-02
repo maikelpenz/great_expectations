@@ -1,3 +1,5 @@
+import logging
+import traceback
 import uuid
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
@@ -7,10 +9,6 @@ import numpy as np
 import great_expectations.exceptions as ge_exceptions
 from great_expectations.core import ExpectationConfiguration
 from great_expectations.core.util import convert_to_json_serializable
-from great_expectations.exceptions.metric_exceptions import (
-    MetricError,
-    MetricProviderError,
-)
 from great_expectations.execution_engine import ExecutionEngine, PandasExecutionEngine
 from great_expectations.execution_engine.execution_engine import (
     MetricDomainTypes,
@@ -22,6 +20,7 @@ from great_expectations.execution_engine.sparkdf_execution_engine import (
     SparkDFExecutionEngine,
 )
 from great_expectations.execution_engine.sqlalchemy_execution_engine import (
+    OperationalError,
     SqlAlchemyExecutionEngine,
     sa,
 )
@@ -34,6 +33,8 @@ from great_expectations.expectations.registry import (
     register_metric,
 )
 from great_expectations.validator.validation_graph import MetricConfiguration
+
+logger = logging.getLogger(__name__)
 
 
 def column_function_partial(
@@ -285,8 +286,6 @@ def column_condition_partial(
                 ) = execution_engine.get_compute_domain(
                     domain_kwargs=metric_domain_kwargs, domain_type=domain_type
                 )
-                # TODO: <Alex>ALEX</Alex>
-                # TODO: <Alex>Is this the correct place for and type of Exception to raise if domain data is not attributable?</Alex>
                 column_name = accessor_domain_kwargs["column"]
                 try:
                     if filter_column_isnull:
@@ -351,6 +350,7 @@ def column_condition_partial(
                 ) = execution_engine.get_compute_domain(
                     metric_domain_kwargs, domain_type=domain_type
                 )
+
                 column_name = accessor_domain_kwargs["column"]
                 dialect = execution_engine.dialect_module
                 sqlalchemy_engine = execution_engine.engine
@@ -413,6 +413,7 @@ def column_condition_partial(
                 filter_column_isnull = kwargs.get(
                     "filter_column_isnull", getattr(cls, "filter_column_isnull", True)
                 )
+
                 (
                     data,
                     compute_domain_kwargs,
@@ -420,11 +421,13 @@ def column_condition_partial(
                 ) = execution_engine.get_compute_domain(
                     domain_kwargs=metric_domain_kwargs, domain_type=domain_type
                 )
+
                 column_name = accessor_domain_kwargs["column"]
                 if column_name not in data.columns:
                     raise ge_exceptions.ExecutionEngineError(
                         message=f'Error: The column "{column_name}" in BatchData does not exist.'
                     )
+
                 column = data[column_name]
                 expected_condition = metric_fn(
                     cls,
@@ -679,7 +682,7 @@ def _pandas_column_map_condition_value_counts(
             pass
 
     if not value_counts:
-        raise MetricError("Unable to compute value counts")
+        raise ge_exceptions.MetricError("Unable to compute value counts")
 
     if result_format["result_format"] == "COMPLETE":
         return value_counts
@@ -772,49 +775,58 @@ def _sqlalchemy_map_condition_unexpected_count_value(
         # mssql expects all temporary table names to have a prefix '#'
         temp_table_name = f"#{temp_table_name}"
 
-    with execution_engine.engine.begin():
-        metadata: sa.MetaData = sa.MetaData(execution_engine.engine)
-        temp_table_obj: sa.Table = sa.Table(
-            temp_table_name,
-            metadata,
-            sa.Column("condition", sa.Integer, primary_key=False, nullable=False),
-        )
-        temp_table_obj.create(execution_engine.engine, checkfirst=True)
+    try:
+        with execution_engine.engine.begin():
+            metadata: sa.MetaData = sa.MetaData(execution_engine.engine)
+            temp_table_obj: sa.Table = sa.Table(
+                temp_table_name,
+                metadata,
+                sa.Column("condition", sa.Integer, primary_key=False, nullable=False),
+            )
+            temp_table_obj.create(execution_engine.engine, checkfirst=True)
 
-        count_case_statement: List[sa.sql.elements.Label] = [
-            sa.case(
+            count_case_statement: List[sa.sql.elements.Label] = [
+                sa.case(
+                    [
+                        (
+                            unexpected_condition,
+                            1,
+                        )
+                    ],
+                    else_=0,
+                ).label("condition")
+            ]
+            inner_case_query: sa.sql.dml.Insert = temp_table_obj.insert().from_select(
+                count_case_statement,
+                sa.select(count_case_statement).select_from(selectable),
+            )
+            execution_engine.engine.execute(inner_case_query)
+
+        unexpected_count_query: sa.Select = (
+            sa.select(
                 [
-                    (
-                        unexpected_condition,
-                        1,
-                    )
-                ],
-                else_=0,
-            ).label("condition")
-        ]
-        inner_case_query: sa.sql.dml.Insert = temp_table_obj.insert().from_select(
-            count_case_statement,
-            sa.select(count_case_statement).select_from(selectable),
+                    sa.func.sum(sa.column("condition")).label("unexpected_count"),
+                ]
+            )
+            .select_from(temp_table_obj)
+            .alias("UnexpectedCountSubquery")
         )
-        execution_engine.engine.execute(inner_case_query)
 
-    unexpected_count_query: sa.Select = (
-        sa.select(
-            [
-                sa.func.sum(sa.column("condition")).label("unexpected_count"),
-            ]
+        unexpected_count = execution_engine.engine.execute(
+            sa.select(
+                [
+                    unexpected_count_query.c.unexpected_count,
+                ]
+            )
+        ).scalar()
+    except OperationalError as oe:
+        exception_message: str = "An SQL execution Exception occurred.  "
+        exception_traceback: str = traceback.format_exc()
+        exception_message += (
+            f'{type(oe).__name__}: "{str(oe)}".  Traceback: "{exception_traceback}".'
         )
-        .select_from(temp_table_obj)
-        .alias("UnexpectedCountSubquery")
-    )
-
-    unexpected_count = execution_engine.engine.execute(
-        sa.select(
-            [
-                unexpected_count_query.c.unexpected_count,
-            ]
-        )
-    ).scalar()
+        logger.error(exception_message)
+        raise ge_exceptions.ExecutionEngineError(message=exception_message)
 
     return convert_to_json_serializable(unexpected_count)
 
@@ -853,10 +865,19 @@ def _sqlalchemy_column_map_condition_values(
     )
     if result_format["result_format"] != "COMPLETE":
         query = query.limit(result_format["partial_unexpected_count"])
-    return [
-        val.unexpected_values
-        for val in execution_engine.engine.execute(query).fetchall()
-    ]
+    try:
+        return [
+            val.unexpected_values
+            for val in execution_engine.engine.execute(query).fetchall()
+        ]
+    except OperationalError as oe:
+        exception_message: str = "An SQL execution Exception occurred.  "
+        exception_traceback: str = traceback.format_exc()
+        exception_message += (
+            f'{type(oe).__name__}: "{str(oe)}".  Traceback: "{exception_traceback}".'
+        )
+        logger.error(exception_message)
+        raise ge_exceptions.ExecutionEngineError(message=exception_message)
 
 
 def _sqlalchemy_column_map_condition_value_counts(
@@ -882,12 +903,21 @@ def _sqlalchemy_column_map_condition_value_counts(
             "_sqlalchemy_column_map_condition_value_counts requires a column in accessor_domain_kwargs"
         )
     column = sa.column(accessor_domain_kwargs["column"])
-    return execution_engine.engine.execute(
-        sa.select([column, sa.func.count(column)])
-        .select_from(selectable)
-        .where(unexpected_condition)
-        .group_by(column)
-    ).fetchall()
+    try:
+        return execution_engine.engine.execute(
+            sa.select([column, sa.func.count(column)])
+            .select_from(selectable)
+            .where(unexpected_condition)
+            .group_by(column)
+        ).fetchall()
+    except OperationalError as oe:
+        exception_message: str = "An SQL execution Exception occurred.  "
+        exception_traceback: str = traceback.format_exc()
+        exception_message += (
+            f'{type(oe).__name__}: "{str(oe)}".  Traceback: "{exception_traceback}".'
+        )
+        logger.error(exception_message)
+        raise ge_exceptions.ExecutionEngineError(message=exception_message)
 
 
 def _sqlalchemy_map_condition_rows(
@@ -915,7 +945,16 @@ def _sqlalchemy_map_condition_rows(
     )
     if result_format["result_format"] != "COMPLETE":
         query = query.limit(result_format["partial_unexpected_count"])
-    return execution_engine.engine.execute(query).fetchall()
+    try:
+        return execution_engine.engine.execute(query).fetchall()
+    except OperationalError as oe:
+        exception_message: str = "An SQL execution Exception occurred.  "
+        exception_traceback: str = traceback.format_exc()
+        exception_message += (
+            f'{type(oe).__name__}: "{str(oe)}".  Traceback: "{exception_traceback}".'
+        )
+        logger.error(exception_message)
+        raise ge_exceptions.ExecutionEngineError(message=exception_message)
 
 
 def _spark_map_condition_unexpected_count_aggregate_fn(
@@ -1346,7 +1385,7 @@ class MapMetricProvider(MetricProvider):
             try:
                 _ = get_metric_provider(metric_name + ".aggregate_fn", execution_engine)
                 has_aggregate_fn = True
-            except MetricProviderError:
+            except ge_exceptions.MetricProviderError:
                 has_aggregate_fn = False
             if has_aggregate_fn:
                 dependencies["metric_partial_fn"] = MetricConfiguration(
@@ -1390,7 +1429,7 @@ class MapMetricProvider(MetricProvider):
                 metric.metric_domain_kwargs,
                 metric.metric_value_kwargs,
             )
-        except MetricProviderError:
+        except ge_exceptions.MetricProviderError:
             pass
 
         return dependencies
